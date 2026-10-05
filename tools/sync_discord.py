@@ -12,14 +12,44 @@ import requests
 from PIL import Image, ImageOps, ImageDraw
 
 API = "https://discord.com/api/v10"
-OUT = Path(__file__).resolve().parents[1] / "site"
-COUNT = 8
-ATLAS_COLS = 4
-ATLAS_ROWS = 2
+ROOT = Path(__file__).resolve().parents[1]
+OUT = ROOT / "site"
+SETTINGS_FILE = ROOT / "settings.json"
+MAX_SUPPORTED_COMMENTS = 32
+DEFAULT_COMMENT_COUNT = 8
+ATLAS_COLS = 8
+ATLAS_ROWS = 4
 CELL = 256
 ATLAS_BANKS = 24
 TIMEZONE = os.environ.get("DISPLAY_TIMEZONE", "America/New_York")
 MAX_MESSAGE_CHARS = int(os.environ.get("MAX_MESSAGE_CHARS", "600"))
+
+def get_comment_count():
+    # Optional environment override for advanced users. Normally you just edit
+    # settings.json in the repo; that change triggers the workflow immediately.
+    raw = os.environ.get("COMMENT_COUNT", "").strip()
+
+    if not raw and SETTINGS_FILE.exists():
+        try:
+            settings = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            raw = str(settings.get("commentCount", "")).strip()
+        except Exception as exc:
+            print(f"WARN: Could not read settings.json ({exc}); using {DEFAULT_COMMENT_COUNT}.")
+
+    if not raw:
+        return DEFAULT_COMMENT_COUNT
+
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"WARN: comment count {raw!r} is invalid; using {DEFAULT_COMMENT_COUNT}.")
+        return DEFAULT_COMMENT_COUNT
+
+    if value < 1 or value > MAX_SUPPORTED_COMMENTS:
+        print(f"WARN: comment count {value} is outside 1-{MAX_SUPPORTED_COMMENTS}; clamping it.")
+    return max(1, min(MAX_SUPPORTED_COMMENTS, value))
+
+COUNT = get_comment_count()
 
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
 CHANNEL_ID = os.environ.get("DISCORD_CHANNEL_ID", "").strip()
@@ -125,9 +155,9 @@ def format_time(iso_time: str):
         return iso_time
 
 
-def make_revision(comments, photo_urls):
+def make_revision(comments, photo_urls, requested_count):
     payload = json.dumps(
-        {"comments": comments, "photos": photo_urls},
+        {"comments": comments, "photos": photo_urls, "requestedCount": requested_count},
         ensure_ascii=False,
         sort_keys=True,
     ).encode("utf-8")
@@ -145,7 +175,7 @@ def main():
     channel = discord_get(f"/channels/{CHANNEL_ID}")
     guild_id = str(channel.get("guild_id") or "")
 
-    raw = discord_get(f"/channels/{CHANNEL_ID}/messages?limit=50")
+    raw = discord_get(f"/channels/{CHANNEL_ID}/messages?limit=100")
     chosen = []
     for msg in raw:
         author = msg.get("author") or {}
@@ -175,7 +205,7 @@ def main():
     while len(photos) < COUNT:
         photos.append(Image.new("RGB", (CELL, CELL), (235, 240, 248)))
 
-    revision = make_revision(comments, photo_urls)
+    revision = make_revision(comments, photo_urls, COUNT)
 
     # Rotate through 24 fixed file names. Unity knows all 24 URLs in advance,
     # which avoids dynamic VRCUrl creation and greatly reduces CDN-cache problems.
@@ -193,6 +223,8 @@ def main():
     feed = {
         "revision": revision,
         "atlasBank": bank,
+        "requestedCount": COUNT,
+        "maxSupported": MAX_SUPPORTED_COMMENTS,
         "count": len(comments),
         "comments": comments,
     }
@@ -207,7 +239,7 @@ def main():
         if not p.exists():
             atlas.save(p, "JPEG", quality=88, optimize=True, progressive=True)
 
-    print(f"Published {len(comments)} comments, revision {revision}, profile-photo bank {bank}.")
+    print(f"Published {len(comments)} comments (requested {COUNT}), revision {revision}, profile-photo bank {bank}.")
 
 
 if __name__ == "__main__":

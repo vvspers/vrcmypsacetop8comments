@@ -2,6 +2,9 @@ name: Update VRChat Comments
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - "settings.json"
   schedule:
     - cron: "*/5 * * * *"
 
