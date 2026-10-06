@@ -1,0 +1,25 @@
+name: Schedule diagnostic
+
+on:
+  schedule:
+    - cron: '2,7,12,17,22,27,32,37,42,47,52,57 * * * *'
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/schedule-diagnostic.yml'
+
+permissions: {}
+
+jobs:
+  check-trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Record trigger and UTC time
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          printf 'event=%s\nschedule=%s\nactor=%s\n' "$EVENT_NAME" "$SCHEDULE" "$ACTOR"
+          date -u '+%Y-%m-%dT%H:%M:%SZ'
