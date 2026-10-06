@@ -7,6 +7,7 @@ import hashlib
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from urllib.parse import urlparse
 
 import requests
 from PIL import Image, ImageOps, ImageDraw
@@ -21,8 +22,12 @@ ATLAS_COLS = 8
 ATLAS_ROWS = 4
 CELL = 256
 ATLAS_BANKS = 24
+COMMENT_CELL = 512
+COMMENT_COLS = 4
+COMMENT_ROWS = 4
+COMMENT_PAGES = 2
 TIMEZONE = os.environ.get("DISPLAY_TIMEZONE", "America/New_York")
-MAX_MESSAGE_CHARS = int(os.environ.get("MAX_MESSAGE_CHARS", "600"))
+MAX_MESSAGE_CHARS = int(os.environ.get("MAX_MESSAGE_CHARS", "4000"))
 
 def get_comment_count():
     # Optional environment override for advanced users. Normally you just edit
@@ -164,6 +169,49 @@ def make_revision(comments, photo_urls, requested_count):
     return hashlib.sha256(payload).hexdigest()[:16]
 
 
+def image_attachments(message):
+    for attachment in message.get("attachments") or []:
+        kind = (attachment.get("content_type") or "").lower()
+        if kind.startswith("image/") or (attachment.get("width") and attachment.get("height")):
+            if not (attachment.get("filename") or "").startswith("SPOILER_"):
+                yield attachment
+
+
+def download_comment_photo(attachment):
+    url = attachment.get("url") or ""
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname not in ("cdn.discordapp.com", "media.discordapp.net"):
+        raise ValueError("Unsupported attachment host")
+    # Decode images locally; publish static RGB JPEG sheets within VRChat's limits.
+    with requests.get(url, timeout=20, stream=True) as response:
+        response.raise_for_status()
+        chunks = []
+        size = 0
+        for chunk in response.iter_content(65536):
+            size += len(chunk)
+            if size > 20 * 1024 * 1024:
+                raise ValueError("Attachment exceeds 20 MiB")
+            chunks.append(chunk)
+    with Image.open(io.BytesIO(b"".join(chunks))) as source:
+        source.seek(0)  # Animated attachments use their first frame.
+        rgba = ImageOps.exif_transpose(source).convert("RGBA")
+        rgba.thumbnail((COMMENT_CELL - 4, COMMENT_CELL - 4), Image.Resampling.LANCZOS)
+        result = Image.new("RGB", rgba.size, "white")
+        result.paste(rgba, mask=rgba.getchannel("A"))
+        return result
+
+
+def pack_comment_photo(sheet, image, slot):
+    # UVs crop away cell padding without cropping the actual attachment.
+    x = (slot % COMMENT_COLS) * COMMENT_CELL + (COMMENT_CELL - image.width) // 2
+    y = (slot // COMMENT_COLS) * COMMENT_CELL + (COMMENT_CELL - image.height) // 2
+    sheet.paste(image, (x, y))
+    return {"photoWidth": image.width, "photoHeight": image.height,
+            "photoU": x / sheet.width, "photoV": 1 - (y + image.height) / sheet.height,
+            "photoUW": image.width / sheet.width, "photoVH": image.height / sheet.height,
+            "photoHash": hashlib.sha256(image.tobytes()).hexdigest()[:16]}
+
+
 def main():
     if not TOKEN:
         die("DISCORD_BOT_TOKEN is missing.")
@@ -182,7 +230,7 @@ def main():
         if author.get("bot"):
             continue
         content = clean_message(msg)
-        if not content:
+        if not content and not any(image_attachments(msg)):
             continue
         chosen.append((msg, content))
         if len(chosen) >= COUNT:
@@ -191,6 +239,8 @@ def main():
     comments = []
     photos = []
     photo_urls = []
+    comment_sheets = [Image.new("RGB", (2048, 2048), "white") for _ in range(COMMENT_PAGES)]
+    used_pages = set()
 
     for msg, content in chosen:
         comments.append({
@@ -198,6 +248,18 @@ def main():
             "time": format_time(msg.get("timestamp", "")),
             "message": content,
         })
+        # One displayed photo per comment: first attachment that decodes successfully.
+        for attachment in image_attachments(msg):
+            try:
+                image = download_comment_photo(attachment)
+                index = len(comments) - 1
+                page = index // 16
+                comments[-1].update(pack_comment_photo(comment_sheets[page], image, index % 16))
+                comments[-1]["photoPage"] = page
+                used_pages.add(page)
+                break
+            except Exception as exc:
+                print(f"WARN: comment image unavailable ({type(exc).__name__})")
         purl = profile_photo_url(msg, guild_id)
         photo_urls.append(purl)
         photos.append(download_profile_photo(purl))
@@ -220,7 +282,12 @@ def main():
     atlas_path = OUT / f"profile-photos-{bank}.jpg"
     atlas.save(atlas_path, "JPEG", quality=88, optimize=True, progressive=True)
 
+    for page in used_pages:
+        comment_sheets[page].save(OUT / f"comment-photos-{bank}-{page}.jpg", "JPEG", quality=90, optimize=True)
+
     feed = {
+        "schemaVersion": 2,
+        "photoAtlasBank": bank,
         "revision": revision,
         "atlasBank": bank,
         "requestedCount": COUNT,

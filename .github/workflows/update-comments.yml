@@ -5,6 +5,9 @@ on:
   push:
     paths:
       - "settings.json"
+      - "tools/**"
+      - "requirements.txt"
+      - ".github/workflows/**"
   schedule:
     - cron: "*/5 * * * *"
 
@@ -39,7 +42,7 @@ jobs:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
           DISPLAY_TIMEZONE: America/New_York
-          MAX_MESSAGE_CHARS: "600"
+          MAX_MESSAGE_CHARS: "4000"
         run: python tools/sync_discord.py
 
       - name: Configure GitHub Pages
